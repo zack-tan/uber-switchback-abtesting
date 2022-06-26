@@ -1,0 +1,480 @@
+---
+title: "MRKT_UberCase"
+author: "Jingyuan Wang"
+date: "05/02/2022"
+output: word_document
+---
+```{r}
+library(dygraphs)
+library(xts)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(rpart)
+```
+
+## Data Acquisation
+```{r}
+setwd("~/Documents/McGill/MRKT671/A2")
+uber_data = read.csv('uber_data.csv')
+head(uber_data)
+```
+```{r}
+summary(uber_data)
+```
+Convert start time to datetime object
+```{r}
+uber_data[['period_start']] <- as.POSIXct(uber_data[['period_start']],
+                                   format = "%Y-%m-%d %H:%M")
+```
+
+Drop columns that contains repetitive values
+```{r}
+uber_data = select(uber_data, -c(wait_time,city_id))
+head(uber_data)
+```
+
+Set categorical variables as factors
+```{r}
+factor_cols = c('treat','commute')
+uber_data[factor_cols] <- lapply(uber_data[factor_cols], factor)
+```
+
+```{r}
+summary(uber_data)
+```
+
+### Define Target Effects
+What is the effect of extending wait times from two to five minutes on:
+2 vs 5 (primary)
+products (good to have)
+- the total number of shared rides completed (that is, rides taken via both the existing shared rides product—UberPOOL and the new shared rides product, Express), 
+- the proportion of shared rides that were matched, 
+- and driver payout per trip
+
+# Weather consideration
+
+```{r}
+uber_data$total_trips = uber_data$trips_pool + uber_data$trips_express
+uber_data$matched_prop = uber_data$total_matches/uber_data$total_trips
+uber_data$avg_ride_payout = uber_data$total_driver_payout/uber_data$total_trips
+head(uber_data)
+```
+## Data Discovery
+### Trips
+Total trips
+```{r}
+ggplot(uber_data,aes(period_start,total_trips))+geom_line(aes(color="Total Trips"))+labs(color="Data Type")
+#plot(x = 'period_start', y = 'total_trips', data = uber_data, main = "Total Trips")
+```
+
+
+```{r}
+treatment_uber = uber_data[uber_data$treat == TRUE,] #5 min
+control_uber = uber_data[uber_data$treat == FALSE,] #2 min
+```
+
+Note that the experiment is performed on a alternative fashion.
+```{r}
+merge_data = merge(x = treatment_uber, y = control_uber, by = 'period_start', all = TRUE)
+head(merge_data)
+```
+This means we need to encode the time series information in order to capture the periodicity underlying the data set.
+
+Compare between # pool rides
+```{r}
+ggplot(treatment_uber,aes(period_start,trips_pool))+geom_line(aes(color="trips_pool_5min"))+geom_line(data=control_uber,aes(color="trips_pool_2min"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,trips_pool))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,trips_pool))
+```
+
+In February, we noticed that patterns in treatment and condition group are relatively similar. However as time moved towards beginning of March, number of pool rides in treatment group surpassed condition group.
+
+Note that weather might play a very important role here.
+
+
+```{r}
+ggplot(treatment_uber,aes(period_start,trips_express))+geom_line(aes(color="trips_express_5min"))+geom_line(data=control_uber,aes(color="trips_express_2min"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,trips_express))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,trips_express))
+```
+
+With Express service, both groups present similar patterns.
+
+### Pool and express service gaps
+Control: 2 min
+```{r}
+don_control <- xts(x = control_uber[,c('trips_pool', 'trips_express')], order.by = control_uber$period_start)
+p_control <- dygraph(don_control, main = "2 Minutes Wait Time Service Gap")
+p_control
+```
+
+For condition group, the gap between two services are consistent.
+
+Treatment: 5 min
+```{r}
+don_trt <- xts(x = treatment_uber[,c('trips_pool', 'trips_express')], order.by = treatment_uber$period_start)
+p_trt <- dygraph(don_trt, main="5 Minutes Wait Time Service Gap")
+p_trt
+```
+For treatment group, gap between two services seems to reduce.
+
+## Deltas between pool and express
+```{r}
+colnames(uber_data)
+```
+
+```{r}
+uber_data$service_deltas = uber_data$trips_express - uber_data$trips_pool
+```
+
+5 min
+```{r}
+trt_deltas = uber_data[uber_data$treat == TRUE,]
+cond_deltas = uber_data[uber_data$treat == FALSE,]
+ggplot(trt_deltas,aes(period_start,service_deltas))+geom_line(aes(color="service_delta_5min"))+geom_smooth(method="auto", se=TRUE, fullrange=FALSE, level=0.95)+labs(color="service type")
+```
+2 min
+```{r}
+ggplot(cond_deltas,aes(period_start,service_deltas))+geom_line(aes(color="service_delta_2min"))+geom_smooth(method="auto", se=TRUE, fullrange=FALSE, level=0.95)+labs(color="service type")
+```
+Both groups has a decreasing trend in service gaps as time moved into March. However, longer wait time tend to have a smaller gap.
+
+### Cancellation
+```{r}
+ggplot(treatment_uber,aes(period_start,rider_cancellations))+geom_line(aes(color="rider_cancellations_5min"))+geom_line(data=control_uber,aes(color="rider_cancellations_2min"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,rider_cancellations))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,rider_cancellations))
+```
+
+### Matches (>1 customers vs >2 customers)
+Treatment (5 min)
+```{r}
+don_matches <- xts(x = treatment_uber[,c('total_matches', 'total_double_matches')], order.by = treatment_uber$period_start)
+p <- dygraph(don_matches) 
+p
+```
+Condition (2 min)
+```{r}
+don_matches_control <- xts(x = control_uber[,c('total_matches', 'total_double_matches')], order.by = control_uber$period_start)
+p <- dygraph(don_matches_control)
+p
+```
+
+Differences between matches are consistent in both groups.
+
+### Proportion on matched trips
+```{r}
+colnames(treatment_uber)
+```
+
+
+```{r}
+ggplot(treatment_uber,aes(period_start,matched_prop))+geom_line(aes(color="matched_prop_treatment"))+geom_line(data=control_uber,aes(color="matched_prop_condition"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,matched_prop))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,matched_prop))
+```
+
+Rides happened during rush hours tend to have a higher matched proportion.
+
+On average, treatment group (5 min wait time) has a lower proportion of matching.
+
+### Total trips treatment vs condition
+```{r}
+ggplot(treatment_uber,aes(period_start,total_trips))+geom_line(aes(color="Total_Trips_5min"))+geom_line(data=control_uber,aes(color="Total_Trips_2min"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,total_trips))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,total_trips))
+```
+
+### Driver's payout per trip
+```{r}
+ggplot(treatment_uber,aes(period_start,avg_ride_payout))+geom_line(aes(color="payout_treatment"))+geom_line(data=control_uber,aes(color="payout_condition"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,avg_ride_payout))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,avg_ride_payout))
+```
+
+As time proceeds, we notice payout for condition group (2 min wait time) tends to become higher than treatment group.
+
+## Seasonality and time series encoding
+Traffic data tends to have daily and weekly periodicity. To deal with rotational experiment, we will encode the time-series datetime into three variables, month, weekday and hour.
+```{r}
+uber_data$period_month = month(as.POSIXlt(uber_data$period_start))
+uber_data$period_weekday = as.POSIXlt(uber_data$period_start)$wday
+uber_data$period_hour = as.POSIXlt(uber_data$period_start)$hour
+```
+
+```{r}
+date_factor_cols = c('period_month','period_weekday', 'period_hour')
+uber_data[date_factor_cols] <- lapply(uber_data[date_factor_cols], factor)
+```
+
+```{r}
+summary(uber_data)
+```
+## Randomization Check
+```{r}
+summary(glm(treat ~ commute + period_month + period_weekday + period_hour, uber_data, family ="binomial"))
+```
+
+## Linear Regression
+Since dependent variables are all categorical, we don't need to perform standardization.
+### Model 1: target variable -> total trips
+```{r}
+uber_lm.total_trips <- lm(total_trips ~ treat + commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.total_trips_int <- lm(total_trips ~ treat + commute + treat*commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.total_trips_nohour <- lm(total_trips ~ treat + commute + period_month + period_weekday, uber_data)
+uber_lm.total_trips_nohour_int <- lm(total_trips ~ treat + commute + treat*commute + period_month + period_weekday, uber_data)
+uber_lm.total_trips_nocommute <- lm(total_trips ~ treat + period_month + period_weekday + period_hour, uber_data)
+uber_lm.total_trips_commute_hour <- lm(total_trips ~ treat + commute+ period_month + period_weekday + period_hour + commute*period_hour, uber_data)
+```
+
+```{r}
+library(stargazer)
+stargazer(uber_lm.total_trips,uber_lm.total_trips_int,uber_lm.total_trips_nohour,uber_lm.total_trips_nohour_int,uber_lm.total_trips_nocommute,uber_lm.total_trips_commute_hour, type = 'html')
+```
+Model 6 has the highest adjusted R-squre. Apply AIC on two models that have the highest adj R-Square.
+```{r}
+library(car)
+AIC(uber_lm.total_trips_int,uber_lm.total_trips_commute_hour)
+```
+```{r}
+stargazer(uber_lm.total_trips_commute_hour, type="text")
+```
+
+The model with commute and treatment interaction term had a slightly higher AIC. Note that both models have very similar AIC scores.
+
+With the models we have fitted previously, we notice:
+- On average, with 5 min wait time, total trips tend to decrease
+- However, wait time did not display high importance according to linear regression
+- Whether trips happened at rush hours or not displayed high importance
+- When the trips happened in a specific hour frame in a day seem to have high importance (daily seasonality in traffic demand)
+
+Extension: Variable importance via ensemble methods
+```{r}
+library(randomForest)
+rf_total_trips = randomForest(total_trips ~ treat + commute + period_month + period_weekday + period_hour, data=uber_data)
+rf_total_trips$importance
+```
+
+### Model 2: target variable -> proportion of shared rides that were matched
+```{r}
+uber_lm.matched_prop <- lm(matched_prop ~ treat + commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.matched_prop_int <- lm(matched_prop ~ treat + commute + treat*commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.matched_prop_nohour <- lm(matched_prop ~ treat + commute + period_month + period_weekday, uber_data)
+uber_lm.matched_prop_nohour_int <- lm(matched_prop ~ treat + commute + treat*commute + period_month + period_weekday, uber_data)
+uber_lm.matched_prop_nocommute <- lm(matched_prop ~ treat + period_month + period_weekday + period_hour, uber_data)
+uber_lm.matched_prop_commute_hour <- lm(matched_prop ~ treat + commute+ period_month + period_weekday + period_hour + commute*period_hour, uber_data)
+```
+
+```{r}
+stargazer(uber_lm.matched_prop,uber_lm.matched_prop_int,uber_lm.matched_prop_nohour,uber_lm.matched_prop_nohour_int,uber_lm.matched_prop_nocommute,uber_lm.matched_prop_commute_hour, type = 'html')
+```
+Model 1 and model 2 had the highest R-square. Compare AIC:
+```{r}
+AIC(uber_lm.matched_prop,uber_lm.matched_prop_int)
+```
+Note that all models here didn't fit well. Adjusted R-square are below 0.4.
+
+With the models we have fitted previously, we notice:
+- With proportion of matched trips, wait time displayed high importance.
+- With longer wait time, matched proportion would decrease
+- Rush hours still displayed high importance
+- Weekly and hourly seasonality displayed some importance
+- If trips happened in March, matched proportion decreased compared to February
+
+Extension: RF feature importance
+```{r}
+rf_matched_prop = randomForest(matched_prop ~ treat + commute + period_month + period_weekday + period_hour, data=uber_data)
+rf_matched_prop$importance
+```
+### Model 3: target variable -> driver payout per trip
+```{r}
+uber_lm.avg_ride_payout <- lm(avg_ride_payout ~ treat + commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.avg_ride_payout_int <- lm(avg_ride_payout ~ treat + commute + treat*commute + period_month + period_weekday + period_hour, uber_data)
+uber_lm.avg_ride_payout_nohour <- lm(avg_ride_payout ~ treat + commute + period_month + period_weekday, uber_data)
+uber_lm.avg_ride_payout_nohour_int <- lm(avg_ride_payout ~ treat + commute + treat*commute + period_month + period_weekday, uber_data)
+uber_lm.avg_ride_payout_nocommute <- lm(avg_ride_payout ~ treat + period_month + period_weekday + period_hour, uber_data)
+uber_lm.avg_ride_payout_commute_hour <- lm(avg_ride_payout ~ treat + commute+ period_month + period_weekday + period_hour + commute*period_hour, uber_data)
+```
+
+```{r}
+stargazer(uber_lm.avg_ride_payout,uber_lm.avg_ride_payout_int,uber_lm.avg_ride_payout_nohour,uber_lm.avg_ride_payout_nohour_int,uber_lm.avg_ride_payout_nocommute,uber_lm.avg_ride_payout_commute_hour, type = 'html')
+```
+Note that models had low adj R-square (below 0.2). 
+
+AIC on top 2 models:
+```{r}
+AIC(uber_lm.avg_ride_payout,uber_lm.avg_ride_payout_commute_hour)
+```
+
+With the models we have fitted previously, we notice:
+- Avg driver payout demonstrated the efficiency of each trip
+- More wait time on average decreased driver payout per trip.
+- Rush hours and hourly seasonality displayed importance
+
+Extension: Random Forest Feature Importance
+```{r}
+rf_avg_ride_payout = randomForest(avg_ride_payout ~ treat + commute + period_month + period_weekday + period_hour, data=uber_data)
+rf_avg_ride_payout$importance
+```
+Note random forest emphasizes more on hourly seasonality.
+
+## Decision Trees
+Note that decision trees naturally could handle possible interactions between variable.
+Note that R-square does not apply well with decision trees
+### Model 1: target variable -> total trips
+```{r}
+
+dt_total_trips <- rpart(total_trips ~ treat + commute + period_month + period_weekday + period_hour, 
+                  method = "anova", data = uber_data)
+```
+
+```{r}
+dt_total_trips$variable.importance
+```
+
+Decision tree displayed no importance om treatment wrt total trips.
+
+```{r}
+print(dt_total_trips)
+```
+
+```{r}
+plot(dt_total_trips, uniform = TRUE,
+          main = "Total Trips with Decision Tree")
+text(dt_total_trips, use.n = TRUE, cex = .7)
+```
+```{r}
+plotcp(dt_total_trips)
+```
+Since our dependent variables are all categorical and we did not have a lot of nodes, there's no need to prune the tree.
+
+```{r}
+rmse_reg <- function(model_obj, testing = NULL, target = NULL) {
+  #Calculates rmse for a regression decision tree
+    yhat <- predict(model_obj, newdata = testing)
+  actual <- testing[[target]]
+  sqrt(mean((yhat-actual)^2))
+}
+rmse_reg(dt_total_trips,uber_data, "total_trips")
+```
+
+Compare to Linear regression
+```{r}
+library(caret)
+linear_total_trip.10fold <- train(total_trips ~ treat + commute + treat*commute + period_month + period_weekday + period_hour, data = uber_data, trControl=trainControl(method="cv", number=10), method="lm")
+print(linear_total_trip.10fold)
+```
+Decision tree has a higher lower RMSE. Due to the nature of the data set, it makes sense that decision trees performed better.
+
+### Model 2: target variable -> proportion of shared rides that were matched
+```{r}
+dt_matched_prop <- rpart(matched_prop ~ treat + commute + period_month + period_weekday + period_hour, 
+                  method = "anova", data = uber_data)
+```
+
+```{r}
+dt_matched_prop$variable.importance
+```
+
+With matching proportion, treatment displayed some importance, not as much compared to other variables.
+
+```{r}
+print(dt_matched_prop)
+```
+This showed a few things that we didn't notice with linear regression
+- If it is not rush hours, if wait time is 5 min, the matching rate is lower than that of 2 min
+- If it is rush hours, demand is high and wait time does not matter
+- Potential consideration: cancellation vs wait.
+
+```{r}
+plot(dt_matched_prop, uniform = TRUE,
+          main = "Matching Proportion with Decision Tree")
+text(dt_matched_prop, use.n = TRUE, cex = .7)
+```
+MSE comparison with linear regression
+```{r}
+rmse_reg(dt_matched_prop,uber_data, "matched_prop")
+```
+
+```{r}
+linear_matched_prop.10fold <- train(matched_prop ~ treat + commute + treat*commute + period_month + period_weekday + period_hour, data = uber_data, trControl=trainControl(method="cv", number=10), method="lm")
+print(linear_matched_prop.10fold)
+```
+Decision performed better.
+
+### Model 3: target variable -> driver payout per trip
+```{r}
+dt_avg_ride_payout <- rpart(avg_ride_payout ~ treat + commute + period_month + period_weekday + period_hour, 
+                            method = "anova", data = uber_data)
+```
+
+```{r}
+dt_avg_ride_payout$variable.importance
+```
+
+Treatment displayed importance with decision tree, similar to linear regression result.
+```{r}
+print(dt_avg_ride_payout)
+```
+```{r}
+plot(dt_avg_ride_payout, uniform = TRUE,
+          main = "Driver Payout per Trip with Decision Tree")
+text(dt_avg_ride_payout, use.n = TRUE, cex = .7)
+```
+- Similar to matching proportion, treatment doesn't affect driver payout per trip too much if it's rush hour.
+- Rush hours on Tuesday, Thursday and Friday tends to have lower payout compare to rush hours on other days.
+- If it's not rush hour, payout for longer wait time is lower.
+- Wait time has some relationship with pricing.
+
+Comparison with linear regression performance
+```{r}
+rmse_reg(dt_avg_ride_payout,uber_data, "avg_ride_payout")
+```
+
+```{r}
+linear_avg_ride_payout.10fold <- train(avg_ride_payout ~ treat + commute + period_month + period_weekday + period_hour, data = uber_data, trControl=trainControl(method="cv", number=10), method="lm")
+print(linear_avg_ride_payout.10fold)
+```
+### Check point: modified data
+```{r}
+write.csv(uber_data,'modified_uber_data.csv')
+```
+
+### Extension: Model 4 cancellation vs wait time
+```{r}
+dt_cancellations <- rpart(rider_cancellations/total_trips ~ treat + commute + period_month + period_weekday + period_hour, 
+                          method = "anova", data = uber_data)
+print(dt_cancellations)
+```
+```{r}
+dt_cancellations$variable.importance
+```
+
+```{r}
+uber_data['cancellation_rate'] = uber_data$rider_cancellations/uber_data$total_trips
+treatment_uber['cancellation_rate'] = treatment_uber$rider_cancellations/treatment_uber$total_trips
+control_uber['cancellation_rate'] = control_uber$rider_cancellations/control_uber$total_trips
+```
+
+
+```{r}
+ggplot(treatment_uber,aes(period_start,cancellation_rate))+geom_line(aes(color="cancellation_rate_5min"))+geom_line(data=control_uber,aes(color="cancellation_rate_2min"))+labs(color="service type")+geom_point(data=treatment_uber[treatment_uber$commute==TRUE,],aes(period_start,cancellation_rate))+ geom_point(data=control_uber[control_uber$commute==TRUE,],aes(period_start,cancellation_rate))
+```
+
+
+### Extension: Model 5 pool trips vs wait time
+```{r}
+dt_pool <- rpart(trips_pool ~ treat + commute + period_month + period_weekday + period_hour, 
+                          method = "anova", data = uber_data)
+print(dt_pool)
+print(dt_pool$variable.importance)
+```
+```{r}
+plot(dt_pool, uniform = TRUE,
+          main = "Pool Trips with Decision Tree")
+text(dt_pool, use.n = TRUE, cex = .7)
+```
+
+
+### Extension: Model 6 express trips vs wait time
+```{r}
+dt_trips_express <- rpart(trips_express ~ treat + commute + period_month + period_weekday + period_hour, 
+                          method = "anova", data = uber_data)
+print(dt_trips_express)
+print(dt_trips_express$variable.importance)
+```
+```{r}
+plot(dt_trips_express, uniform = TRUE,
+          main = "Express Trips with Decision Tree")
+text(dt_trips_express, use.n = TRUE, cex = .7)
+```
+
